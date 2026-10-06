@@ -46,6 +46,24 @@ sheet through MCP, or apply SLOs.
 
 ## Spreadsheet structure
 
+**Each row represents one objective.** The `slo_name` column determines which
+SLO it belongs to, within the specified `project`. Rows with the same project
+and SLO name are grouped into one YAML SLO, with each row added to
+`spec.objectives`.
+
+For example:
+
+| project | slo_name | objective_name |
+| --- | --- | --- |
+| demo-commerce | demo-store-latency | catalog-items-get-p95 |
+| demo-commerce | demo-store-latency | cart-post-p95 |
+| demo-commerce | demo-store-reliability | catalog-items-get-success |
+
+These three rows create **two SLOs**: latency with two objectives, and
+reliability with one. This shortened example illustrates grouping; the sample
+workbook includes four rows, giving each SLO two objectives. The same SLO name
+in a different project belongs to a separate SLO.
+
 Edit the **SLO Template** worksheet. The **Instructions** and **Field map**
 worksheets explain the columns. Add rows to define additional objectives.
 
