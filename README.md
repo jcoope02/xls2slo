@@ -59,7 +59,6 @@ worksheets explain the columns. Add rows to define additional objectives.
 | `objective_name`, `objective_display_name`, `target`, `objective_value` | Objective settings |
 | `metric_type`, `operator`, `incremental` | Select raw or count metrics and their settings |
 | `splunk_environment`, `splunk_service`, `splunk_operation` | Splunk query context |
-| `good_program`, `total_program` | Authoritative reliability queries; latency queries are generated automatically |
 
 Shared SLO fields must agree within a group. Objective names and values must
 be unique within each SLO. Keep `target` as a numeric fraction such as `0.999`;
@@ -71,7 +70,7 @@ No unit conversion is performed. The sample's latency values are illustrative;
 verify your Splunk metric units and intended thresholds. For count metrics,
 `objective_value` is the legacy objective identifier, not a reliability threshold.
 
-## Automatic latency programs
+## Automatic query generation
 
 For `rawMetric` rows, the script generates SignalFlow from the endpoint, method,
 environment, service and operation columns. `splunk_operation` must equal
@@ -83,9 +82,10 @@ The current query template uses:
 - `SERVER` and `CONSUMER` spans with `sf_error=false`.
 - Exclusions for dimensionalized and service-mesh spans.
 
-The sample has no `raw_program` column. Latency queries are generated entirely
-from the context columns. Advanced users may add an optional `raw_program`
-column to compare an existing query against the generated one. A nonblank
+The sample contains no program columns. All latency and reliability queries are
+generated from the context inputs. Advanced users may add optional `raw_program`,
+`good_program`, and `total_program` columns to compare existing queries against
+the generated ones. These references are never copied into output. A nonblank
 reference must match by default; for intentional differences, update/clear
 the optional reference or explicitly allow differences:
 
@@ -98,10 +98,16 @@ Use `--latency-percentile 99` to generate p99 for all raw metric rows; also upda
 objective names, thresholds and references as appropriate. The generator does
 not infer the percentile from objective names.
 
-For `countMetrics`, the script uses `good_program` and `total_program` from the
-sheet and checks their environment/service/operation filters against the context
-columns. `incremental` must be TRUE or FALSE. Reliability programs are not
-automatically generated in this version.
+For `countMetrics`, the script automatically generates both programs using
+`data('spans.count', ...).sum()`:
+
+- **Good:** count matching spans with `sf_error=false`, published as `good`.
+- **Total:** count all matching spans without the error filter, published as `total`.
+
+Both use the context inputs, the same `SERVER`/`CONSUMER` span-kind filter, and
+the same dimensionalized/service-mesh exclusions. `incremental` must be TRUE
+or FALSE. The sample uses FALSE. The latency percentile option does not affect
+reliability queries.
 
 ## Compare with existing YAML
 
@@ -130,7 +136,7 @@ window, and objective-level `rawMetric` or `countMetrics`. Calendar windows,
 Timeslices, composites and other sources need additional template/parser support.
 
 Validation checks headers, required fields, names, numeric and boolean values,
-group consistency, objective uniqueness, metric branches, query context and
+group consistency, objective uniqueness, metric branches, context consistency and
 reference-program consistency when an optional reference is supplied. Formula cells are rejected; use literal values.
 Validation is offline and does not confirm that referenced projects, services
 or data sources exist in Nobl9, or that Splunk queries execute successfully.

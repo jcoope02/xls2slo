@@ -10,8 +10,8 @@ Example:
 
 One row = one objective. Group by (project, slo_name). This version supports
 Splunk Observability, Occurrences, and one rolling window. Latency raw programs
-are generated, never copied from raw_program. Reliability good/total programs
-are read from the sheet. Context/query disagreements are validation errors.
+and reliability good/total programs are generated from context inputs. Optional
+program columns are comparison references only, never copied into output.
 No API calls are made, no SLOs are applied, and existing output files require
 --overwrite. Configuration comparison is semantic, not byte-for-byte.
 """
@@ -58,7 +58,6 @@ REQUIRED_HEADERS = {
     'window_count', 'window_is_rolling', 'objective_name', 'target',
     'objective_value', 'metric_type', 'operator', 'incremental',
     'splunk_environment', 'splunk_service', 'splunk_operation',
-    'good_program', 'total_program',
 }
 
 
@@ -105,18 +104,33 @@ def quoted(value):
     return repr(value)
 
 
-def raw_program(row, percentile):
-    f = (
+def span_filter(row, non_error=True):
+    return (
         f"filter('sf_environment', {quoted(row['splunk_environment'])}) and "
         f"filter('sf_service', {quoted(row['splunk_service'])}) and "
         f"filter('sf_operation', {quoted(row['splunk_operation'])}) and "
         "filter('sf_kind', 'SERVER', 'CONSUMER') and "
-        "filter('sf_error', 'false') and (not filter('sf_dimensionalized', '*')) "
+        + ("filter('sf_error', 'false') and " if non_error else '')
+        + "(not filter('sf_dimensionalized', '*')) "
         "and (not filter('sf_serviceMesh', '*'))"
     )
+
+
+def raw_program(row, percentile):
+    f = span_filter(row)
     return (
         f'filter_ = {f}\n\n'
         f"A = histogram('spans', filter=filter_).percentile(pct={percentile}).publish(label='p{percentile}')"
+    )
+
+
+def count_program(row, branch):
+    if branch not in ('good', 'total'):
+        raise ValueError('Count branch must be good or total.')
+    variable = branch + '_filter'
+    return (
+        f'{variable} = {span_filter(row, non_error=branch == "good")}\n\n'
+        f"data('spans.count', filter={variable}).sum().publish(label='{branch}')"
     )
 
 
@@ -124,29 +138,15 @@ def normalized_program(value):
     return '\n'.join(line.rstrip() for line in str(value).replace('\r\n', '\n').split('\n')).strip()
 
 
-def filter_values(program, key):
-    # Inspect static filter string literals without executing spreadsheet code.
-    import ast
-    try:
-        tree = ast.parse(program)
-    except SyntaxError as exc:
-        raise ValidationError(f'Invalid SignalFlow program syntax: {exc.msg}') from exc
-    return [
-        node.args[1].value for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name) and node.func.id == 'filter'
-        and len(node.args) >= 2
-        and isinstance(node.args[0], ast.Constant) and node.args[0].value == key
-        and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
-    ]
-
-
-def check_context(program, row, label):
-    for key, column in [('sf_environment', 'splunk_environment'),
-                        ('sf_service', 'splunk_service'), ('sf_operation', 'splunk_operation')]:
-        values = filter_values(program, key)
-        if not values or any(v != row[column] for v in values):
-            raise ValidationError(f"Row {row['_row']}: {label} {key} disagrees with {column}.")
+def compare_reference(row, field, program, messages, allow_differences):
+    label = field.removesuffix('_program')
+    if text(row[field]):
+        match = normalized_program(row[field]) == normalized_program(program)
+        messages.append(f'Row {row["_row"]}: generated {label} program vs spreadsheet reference: {"MATCH" if match else "DIFFERENT"}')
+        if not match and not allow_differences:
+            raise ValidationError(f'Row {row["_row"]}: generated {label} program differs from reference. Review it; use --allow-reference-differences for intentional changes.')
+    else:
+        messages.append(f'Row {row["_row"]}: generated {label} program; no spreadsheet reference supplied.')
 
 
 def read_rows(path, sheet):
@@ -257,23 +257,15 @@ def build_slos(rows, label_columns, percentile=95, allow_reference_differences=F
             if text(r['good_program']) or text(r['total_program']) or r['incremental'] not in (None, ''):
                 raise ValidationError(f'Row {n}: countMetrics fields must be blank for rawMetric.')
             program = raw_program(r, percentile)
-            if text(r['raw_program']):
-                match = normalized_program(r['raw_program']) == normalized_program(program)
-                messages.append(f'Row {n}: generated raw program vs spreadsheet reference: {"MATCH" if match else "DIFFERENT"}')
-                if not match and not allow_reference_differences:
-                    raise ValidationError(f'Row {n}: generated raw program differs from reference. Review it; use --allow-reference-differences for intentional changes.')
-            else:
-                messages.append(f'Row {n}: generated raw program; no spreadsheet reference supplied.')
+            compare_reference(r, 'raw_program', program, messages, allow_reference_differences)
             objective.update(op=r['operator'], rawMetric={'query': {'splunkObservability': {'program': program}}})
         elif r['metric_type'] == 'countMetrics':
             if r['operator'] or text(r['raw_program']):
                 raise ValidationError(f'Row {n}: rawMetric fields must be blank for countMetrics.')
             counts = {'incremental': boolean(r['incremental'], 'incremental', n)}
             for field, branch in [('good_program', 'good'), ('total_program', 'total')]:
-                if not text(r[field]):
-                    raise ValidationError(f'Row {n}: {field} is required.')
-                program = str(r[field]).replace('\r\n', '\n')
-                check_context(program, r, field)
+                program = count_program(r, branch)
+                compare_reference(r, field, program, messages, allow_reference_differences)
                 counts[branch] = {'splunkObservability': {'program': program}}
             objective['countMetrics'] = counts
         else:
@@ -361,7 +353,7 @@ def main(argv=None):
     parser.add_argument('--latency-percentile', type=int, default=95,
                         help='Percentile used for generated raw programs (default: 95).')
     parser.add_argument('--allow-reference-differences', action='store_true',
-                        help='Allow generated raw programs to differ from old spreadsheet references.')
+                        help='Allow generated programs to differ from optional spreadsheet references.')
     parser.add_argument('--compare-original', nargs='+', type=Path, default=[])
     parser.add_argument('--report', type=Path)
     parser.add_argument('--overwrite', action='store_true')
